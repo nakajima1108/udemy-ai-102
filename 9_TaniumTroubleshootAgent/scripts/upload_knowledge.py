@@ -1,77 +1,83 @@
 """
-Azure AI Search へ Tanium トラブルシューティングナレッジをアップロードするスクリプト。
-初回セットアップ時および全件再インデックス時に使用する。
-
-使用方法:
-  python upload_knowledge.py                  # 増分アップロード (デフォルト)
-  python upload_knowledge.py --full-reindex   # インデックス削除→再作成→全件アップロード
+Azure AI Search インデックスを作成し、ナレッジベース JSON をアップロードするスクリプト。
+初回セットアップ時、またはインデックスを再構築する際に使用する。
 """
 
-import argparse
 import json
 import os
-from datetime import datetime, timezone
+import sys
 from pathlib import Path
+from datetime import datetime, timezone
 
+from dotenv import load_dotenv
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
-    HnswAlgorithmConfiguration,
+    SearchIndex,
     SearchField,
     SearchFieldDataType,
-    SearchIndex,
-    SemanticConfiguration,
-    SemanticField,
-    SemanticPrioritizedFields,
-    SemanticSearch,
     SimpleField,
+    SearchableField,
     VectorSearch,
+    HnswAlgorithmConfiguration,
     VectorSearchProfile,
+    SemanticConfiguration,
+    SemanticSearch,
+    SemanticPrioritizedFields,
+    SemanticField,
 )
-from dotenv import load_dotenv
 from openai import AzureOpenAI
 
 load_dotenv()
 
 SEARCH_ENDPOINT = os.environ["AZURE_SEARCH_ENDPOINT"]
-SEARCH_KEY = os.environ["AZURE_SEARCH_KEY"]
-INDEX_NAME = os.environ.get("AZURE_SEARCH_INDEX_NAME", "tanium-knowledge")
+SEARCH_API_KEY = os.environ["AZURE_SEARCH_API_KEY"]
+INDEX_NAME = os.environ.get("AZURE_SEARCH_INDEX_NAME", "tanium-troubleshoot-knowledge")
 OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
-OPENAI_KEY = os.environ["AZURE_OPENAI_API_KEY"]
-EMBEDDING_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-ada-002")
+OPENAI_API_KEY = os.environ["AZURE_OPENAI_API_KEY"]
+OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-01")
+EMBEDDING_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
+EMBEDDING_DIMENSIONS = 1536
 
-KNOWLEDGE_FILE = Path(__file__).parent.parent / "knowledge_base" / "tanium_troubleshoot_knowledge.json"
+KNOWLEDGE_BASE_PATH = Path(__file__).parent.parent / "knowledge_base" / "tanium_troubleshoot_knowledge.json"
 
 
-def get_index_schema() -> SearchIndex:
+def build_index_definition() -> SearchIndex:
     fields = [
         SimpleField(name="id", type=SearchFieldDataType.String, key=True, filterable=True),
-        SearchField(name="category", type=SearchFieldDataType.String, filterable=True, facetable=True),
-        SearchField(name="severity", type=SearchFieldDataType.String, filterable=True, facetable=True),
-        SearchField(name="symptom", type=SearchFieldDataType.String, searchable=True, analyzer_name="ja.microsoft"),
-        SearchField(name="cause", type=SearchFieldDataType.String, searchable=True, analyzer_name="ja.microsoft"),
-        SearchField(name="resolution", type=SearchFieldDataType.String, searchable=True, analyzer_name="ja.microsoft"),
-        SearchField(name="tanium_query", type=SearchFieldDataType.String, searchable=True),
-        SearchField(
+        SearchableField(name="category", type=SearchFieldDataType.String, filterable=True, facetable=True),
+        SearchableField(name="symptom", type=SearchFieldDataType.String, analyzer_name="ja.microsoft"),
+        SearchableField(name="cause", type=SearchFieldDataType.String, analyzer_name="ja.microsoft"),
+        SearchableField(name="resolution", type=SearchFieldDataType.String, analyzer_name="ja.microsoft"),
+        SearchableField(name="tanium_query", type=SearchFieldDataType.String),
+        SimpleField(
             name="affected_os",
             type=SearchFieldDataType.Collection(SearchFieldDataType.String),
-            searchable=True,
             filterable=True,
+            facetable=True,
         ),
-        SearchField(
+        SimpleField(name="severity", type=SearchFieldDataType.String, filterable=True, facetable=True),
+        SimpleField(
             name="tags",
             type=SearchFieldDataType.Collection(SearchFieldDataType.String),
-            searchable=True,
             filterable=True,
+            facetable=True,
         ),
-        SimpleField(name="created_at", type=SearchFieldDataType.DateTimeOffset, sortable=True),
-        SimpleField(name="updated_at", type=SearchFieldDataType.DateTimeOffset, sortable=True),
+        SimpleField(name="created_at", type=SearchFieldDataType.DateTimeOffset, filterable=True, sortable=True),
+        SimpleField(name="updated_at", type=SearchFieldDataType.DateTimeOffset, filterable=True, sortable=True),
         SearchField(
             name="symptom_vector",
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
             searchable=True,
-            vector_search_dimensions=1536,
+            vector_search_dimensions=EMBEDDING_DIMENSIONS,
+            vector_search_profile_name="hnsw-profile",
+        ),
+        SearchField(
+            name="resolution_vector",
+            type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
+            searchable=True,
+            vector_search_dimensions=EMBEDDING_DIMENSIONS,
             vector_search_profile_name="hnsw-profile",
         ),
     ]
@@ -84,14 +90,11 @@ def get_index_schema() -> SearchIndex:
     semantic_search = SemanticSearch(
         configurations=[
             SemanticConfiguration(
-                name="default",
+                name="tanium-semantic",
                 prioritized_fields=SemanticPrioritizedFields(
                     title_field=SemanticField(field_name="symptom"),
-                    content_fields=[
-                        SemanticField(field_name="cause"),
-                        SemanticField(field_name="resolution"),
-                    ],
-                    keywords_fields=[SemanticField(field_name="tags")],
+                    content_fields=[SemanticField(field_name="resolution")],
+                    keywords_fields=[SemanticField(field_name="tags"), SemanticField(field_name="category")],
                 ),
             )
         ]
@@ -105,64 +108,68 @@ def get_index_schema() -> SearchIndex:
     )
 
 
-def embed_text(client: AzureOpenAI, text: str) -> list[float]:
-    response = client.embeddings.create(input=text, model=EMBEDDING_DEPLOYMENT)
+def create_or_update_index(index_client: SearchIndexClient) -> None:
+    index_def = build_index_definition()
+    index_client.create_or_update_index(index_def)
+    print(f"インデックス '{INDEX_NAME}' を作成/更新しました。")
+
+
+def generate_embedding(client: AzureOpenAI, text: str) -> list[float]:
+    response = client.embeddings.create(model=EMBEDDING_DEPLOYMENT, input=text)
     return response.data[0].embedding
 
 
-def prepare_document(case: dict, embedding_client: AzureOpenAI) -> dict:
-    symptom_vector = embed_text(embedding_client, case["symptom"])
-    return {
-        "id": case["id"],
-        "category": case["category"],
-        "severity": case["severity"],
-        "symptom": case["symptom"],
-        "cause": case["cause"],
-        "resolution": case["resolution"],
-        "tanium_query": case.get("tanium_query", ""),
-        "affected_os": case.get("affected_os", []),
-        "tags": case.get("tags", []),
-        "created_at": case.get("created_at", datetime.now(timezone.utc).isoformat()),
-        "updated_at": case.get("updated_at", datetime.now(timezone.utc).isoformat()),
-        "symptom_vector": symptom_vector,
-    }
+def prepare_documents(raw_docs: list[dict], openai_client: AzureOpenAI) -> list[dict]:
+    documents = []
+    for i, doc in enumerate(raw_docs):
+        print(f"  ベクター生成中: {doc['id']} ({i + 1}/{len(raw_docs)})")
+        doc["symptom_vector"] = generate_embedding(openai_client, doc["symptom"])
+        doc["resolution_vector"] = generate_embedding(openai_client, doc["resolution"])
+        documents.append(doc)
+    return documents
 
 
-def create_or_recreate_index(index_client: SearchIndexClient, full_reindex: bool) -> None:
-    existing = [idx.name for idx in index_client.list_indexes()]
-    if INDEX_NAME in existing:
-        if full_reindex:
-            print(f"既存インデックス '{INDEX_NAME}' を削除します...")
-            index_client.delete_index(INDEX_NAME)
-        else:
-            return
-    print(f"インデックス '{INDEX_NAME}' を作成します...")
-    index_client.create_index(get_index_schema())
+def upload_documents(search_client: SearchClient, documents: list[dict]) -> None:
+    batch_size = 100
+    for i in range(0, len(documents), batch_size):
+        batch = documents[i : i + batch_size]
+        result = search_client.upload_documents(documents=batch)
+        succeeded = sum(1 for r in result if r.succeeded)
+        failed = len(result) - succeeded
+        print(f"  アップロード完了: 成功={succeeded}, 失敗={failed} (バッチ {i // batch_size + 1})")
 
 
-def upload(full_reindex: bool = False) -> None:
-    credential = AzureKeyCredential(SEARCH_KEY)
+def main() -> None:
+    if not KNOWLEDGE_BASE_PATH.exists():
+        print(f"エラー: ナレッジベースファイルが見つかりません: {KNOWLEDGE_BASE_PATH}", file=sys.stderr)
+        sys.exit(1)
+
+    credential = AzureKeyCredential(SEARCH_API_KEY)
     index_client = SearchIndexClient(endpoint=SEARCH_ENDPOINT, credential=credential)
     search_client = SearchClient(endpoint=SEARCH_ENDPOINT, index_name=INDEX_NAME, credential=credential)
-    embedding_client = AzureOpenAI(azure_endpoint=OPENAI_ENDPOINT, api_key=OPENAI_KEY, api_version="2024-02-01")
+    openai_client = AzureOpenAI(
+        azure_endpoint=OPENAI_ENDPOINT,
+        api_key=OPENAI_API_KEY,
+        api_version=OPENAI_API_VERSION,
+    )
 
-    create_or_recreate_index(index_client, full_reindex)
+    print("Step 1: インデックスを作成/更新します...")
+    create_or_update_index(index_client)
 
-    knowledge = json.loads(KNOWLEDGE_FILE.read_text(encoding="utf-8"))
-    cases = knowledge["cases"]
+    print("Step 2: ナレッジベース JSON を読み込みます...")
+    with open(KNOWLEDGE_BASE_PATH, encoding="utf-8") as f:
+        knowledge_data = json.load(f)
+    raw_docs = knowledge_data["documents"]
+    print(f"  {len(raw_docs)} 件のドキュメントを読み込みました。")
 
-    documents = []
-    for i, case in enumerate(cases):
-        print(f"  埋め込みベクター生成中 [{i + 1}/{len(cases)}]: {case['id']}")
-        documents.append(prepare_document(case, embedding_client))
+    print("Step 3: ベクターを生成します...")
+    documents = prepare_documents(raw_docs, openai_client)
 
-    result = search_client.upload_documents(documents=documents)
-    succeeded = sum(1 for r in result if r.succeeded)
-    print(f"\nアップロード完了: {succeeded}/{len(documents)} 件成功")
+    print("Step 4: Azure AI Search へアップロードします...")
+    upload_documents(search_client, documents)
+
+    print(f"\n完了: {len(documents)} 件のナレッジをインデックス '{INDEX_NAME}' にアップロードしました。")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Taniumナレッジを Azure AI Search にアップロードする")
-    parser.add_argument("--full-reindex", action="store_true", help="インデックスを削除して全件再作成する")
-    args = parser.parse_args()
-    upload(full_reindex=args.full_reindex)
+    main()
