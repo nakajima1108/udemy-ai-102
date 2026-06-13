@@ -1,0 +1,299 @@
+{
+  "agent_name": "Tanium トラブルシュート アシスタント",
+  "description": "端末・ネットワーク障害の診断と解決策を提示するAIエージェント。Taniumを活用した診断クエリも提供する。",
+  "topics": [
+    {
+      "name": "端末トラブル診断",
+      "trigger_phrases": [
+        "端末が重い",
+        "PCが動かない",
+        "パソコンが遅い",
+        "CPUが高い",
+        "メモリ不足",
+        "フリーズする",
+        "アプリが落ちる",
+        "端末のトラブル"
+      ],
+      "conversation_flow": [
+        {
+          "step": 1,
+          "node_type": "Question",
+          "message": "端末のトラブルについて教えてください。以下のどの症状に近いですか？",
+          "options": [
+            "CPU/メモリ使用率が高い",
+            "アプリケーションが応答しない",
+            "Taniumクライアントがオフライン",
+            "その他の症状"
+          ],
+          "variable": "terminal_symptom_type"
+        },
+        {
+          "step": 2,
+          "node_type": "Question",
+          "message": "対象端末のホスト名またはIPアドレスを教えてください。",
+          "variable": "target_hostname"
+        },
+        {
+          "step": 3,
+          "node_type": "HTTP_Action",
+          "description": "Azure AI Search でナレッジを検索する",
+          "connector": "AzureAISearch_CustomConnector",
+          "action": "SearchKnowledge",
+          "parameters": {
+            "search": "{terminal_symptom_type}",
+            "queryType": "semantic",
+            "semanticConfiguration": "default",
+            "filter": "category eq 'performance' or category eq 'tanium_client'",
+            "$top": 3
+          },
+          "output_variable": "search_results"
+        },
+        {
+          "step": 4,
+          "node_type": "Generative_AI",
+          "description": "検索結果を元に解決策を生成する",
+          "system_prompt_ref": "system_prompt.txt",
+          "input_variables": ["terminal_symptom_type", "target_hostname", "search_results"],
+          "output_variable": "ai_response"
+        },
+        {
+          "step": 5,
+          "node_type": "Message",
+          "message": "{ai_response}"
+        },
+        {
+          "step": 6,
+          "node_type": "Question",
+          "message": "問題は解決しましたか？",
+          "options": ["はい、解決しました", "いいえ、まだ解決していません"],
+          "variable": "is_resolved"
+        },
+        {
+          "step": 7,
+          "condition": "is_resolved == 'いいえ、まだ解決していません'",
+          "node_type": "Message",
+          "message": "エスカレーションが必要な場合は、以下の情報をエンジニアチームに共有してください:\n- 端末名: {target_hostname}\n- 症状: {terminal_symptom_type}\n- 試した対処: {ai_response}\n\nServiceNowチケットを起票することをお勧めします。"
+        }
+      ]
+    },
+    {
+      "name": "ネットワーク診断",
+      "trigger_phrases": [
+        "ネットワークにつながらない",
+        "インターネットが使えない",
+        "DNSが引けない",
+        "pingが通らない",
+        "IPが取得できない",
+        "プロキシエラー",
+        "ネットワーク障害"
+      ],
+      "conversation_flow": [
+        {
+          "step": 1,
+          "node_type": "Question",
+          "message": "ネットワークのトラブルについて教えてください。どの症状ですか？",
+          "options": [
+            "DNSが解決できない",
+            "IPアドレスが取得できない (169.254.x.x)",
+            "プロキシ経由の通信が失敗する",
+            "特定のVLAN/サブネット全体が影響",
+            "その他"
+          ],
+          "variable": "network_symptom_type"
+        },
+        {
+          "step": 2,
+          "node_type": "Question",
+          "message": "影響を受けているエンドポイントの情報を教えてください（ホスト名、またはサブネット）。",
+          "variable": "affected_endpoint"
+        },
+        {
+          "step": 3,
+          "node_type": "HTTP_Action",
+          "description": "Azure AI Search でナレッジを検索する",
+          "connector": "AzureAISearch_CustomConnector",
+          "action": "SearchKnowledge",
+          "parameters": {
+            "search": "{network_symptom_type}",
+            "queryType": "semantic",
+            "semanticConfiguration": "default",
+            "filter": "category eq 'network'",
+            "$top": 3
+          },
+          "output_variable": "search_results"
+        },
+        {
+          "step": 4,
+          "node_type": "Generative_AI",
+          "system_prompt_ref": "system_prompt.txt",
+          "input_variables": ["network_symptom_type", "affected_endpoint", "search_results"],
+          "output_variable": "ai_response"
+        },
+        {
+          "step": 5,
+          "node_type": "Message",
+          "message": "{ai_response}"
+        },
+        {
+          "step": 6,
+          "node_type": "Question",
+          "message": "Taniumで診断クエリを実行しますか？",
+          "options": ["はい、クエリを表示してほしい", "いいえ、不要です"],
+          "variable": "show_tanium_query"
+        },
+        {
+          "step": 7,
+          "condition": "show_tanium_query == 'はい、クエリを表示してほしい'",
+          "node_type": "Message",
+          "message": "以下のTaniumクエリを実行してください:\n\n```\n{search_results[0].tanium_query}\n```\n\nTanium Console → Interact → クエリ入力欄に貼り付けて実行してください。"
+        }
+      ]
+    },
+    {
+      "name": "Taniumクエリ実行支援",
+      "trigger_phrases": [
+        "Taniumクエリを教えて",
+        "センサーが取得できない",
+        "Taniumで調べたい",
+        "エンドポイントの状態確認",
+        "Taniumオフライン"
+      ],
+      "conversation_flow": [
+        {
+          "step": 1,
+          "node_type": "Question",
+          "message": "何を調べたいですか？",
+          "options": [
+            "クライアントの接続状態",
+            "CPU/メモリ使用率",
+            "ネットワーク設定",
+            "パッチ適用状況",
+            "その他"
+          ],
+          "variable": "query_purpose"
+        },
+        {
+          "step": 2,
+          "node_type": "HTTP_Action",
+          "connector": "AzureAISearch_CustomConnector",
+          "action": "SearchKnowledge",
+          "parameters": {
+            "search": "{query_purpose} Taniumクエリ",
+            "queryType": "semantic",
+            "semanticConfiguration": "default",
+            "$top": 5,
+            "$select": "id,symptom,tanium_query,category"
+          },
+          "output_variable": "query_results"
+        },
+        {
+          "step": 3,
+          "node_type": "Generative_AI",
+          "system_prompt_ref": "system_prompt.txt",
+          "instruction": "ユーザーの目的に合ったTaniumクエリを提示し、クエリの使い方を説明してください。",
+          "input_variables": ["query_purpose", "query_results"],
+          "output_variable": "ai_response"
+        },
+        {
+          "step": 4,
+          "node_type": "Message",
+          "message": "{ai_response}"
+        }
+      ]
+    },
+    {
+      "name": "ナレッジ更新依頼",
+      "trigger_phrases": [
+        "ナレッジを追加したい",
+        "解決策を登録したい",
+        "新しいトラブル事例を追加",
+        "ナレッジを更新"
+      ],
+      "conversation_flow": [
+        {
+          "step": 1,
+          "node_type": "Message",
+          "message": "新しいトラブルシューティングナレッジを登録します。以下の情報を教えてください。"
+        },
+        {
+          "step": 2,
+          "node_type": "Question",
+          "message": "障害の症状を具体的に説明してください。",
+          "variable": "new_symptom"
+        },
+        {
+          "step": 3,
+          "node_type": "Question",
+          "message": "原因は何でしたか？",
+          "variable": "new_cause"
+        },
+        {
+          "step": 4,
+          "node_type": "Question",
+          "message": "解決手順を教えてください。",
+          "variable": "new_resolution"
+        },
+        {
+          "step": 5,
+          "node_type": "Question",
+          "message": "カテゴリを選択してください。",
+          "options": ["tanium_client", "network", "performance", "patch", "security", "other"],
+          "variable": "new_category"
+        },
+        {
+          "step": 6,
+          "node_type": "Question",
+          "message": "重大度を選択してください。",
+          "options": ["critical", "high", "medium", "low"],
+          "variable": "new_severity"
+        },
+        {
+          "step": 7,
+          "node_type": "HTTP_Action",
+          "description": "Power Automate フローを呼び出してナレッジJSONに追記 + Azure AI Searchへ反映",
+          "connector": "PowerAutomate_Flow",
+          "action": "UpdateKnowledge",
+          "parameters": {
+            "symptom": "{new_symptom}",
+            "cause": "{new_cause}",
+            "resolution": "{new_resolution}",
+            "category": "{new_category}",
+            "severity": "{new_severity}"
+          },
+          "output_variable": "update_result"
+        },
+        {
+          "step": 8,
+          "node_type": "Message",
+          "message": "ナレッジを登録しました（ID: {update_result.id}）。次回の検索から利用可能になります。ありがとうございました。"
+        }
+      ]
+    }
+  ],
+  "copilot_studio_setup_notes": {
+    "generative_ai_node": "各トピックのステップ4で使用するGenerative AIノードには system_prompt.txt の内容を設定する。",
+    "custom_connector": {
+      "name": "AzureAISearch_CustomConnector",
+      "base_url": "https://{your-search-service}.search.windows.net",
+      "auth": "APIキー認証 (ヘッダー: api-key)",
+      "actions": [
+        {
+          "name": "SearchKnowledge",
+          "method": "GET",
+          "path": "/indexes/tanium-knowledge/docs",
+          "query_params": ["search", "queryType", "semanticConfiguration", "filter", "$top", "$select", "api-version"],
+          "default_api_version": "2024-07-01"
+        }
+      ]
+    },
+    "power_automate_flow": {
+      "trigger": "Copilot Studio HTTP Request",
+      "actions": [
+        "Azure Blob Storage または GitHub: knowledge JSONを読み込む",
+        "新規ケースをJSONに追記する",
+        "更新済みJSONをストレージに書き戻す",
+        "Azure AI Search REST API: MergeOrUpload でドキュメントを更新する"
+      ]
+    }
+  }
+}
