@@ -1,0 +1,563 @@
+{
+  "design_version": "1.0",
+  "description": "Microsoft Copilot Studio トピック定義（設計仕様書）。Copilot Studio への手動実装のリファレンスとして使用する。",
+  "agent_name": "Tanium トラブルシューティングエージェント",
+  "language": "ja-JP",
+  "fallback_topic": "フォールバック",
+  "topics": [
+    {
+      "name": "端末トラブル診断",
+      "description": "端末の動作異常・障害を診断し、解決手順を提示する。",
+      "trigger_phrases": [
+        "PCが起動しない",
+        "端末が重い",
+        "ブルースクリーンが出る",
+        "フリーズする",
+        "アプリが落ちる",
+        "端末の調子が悪い",
+        "パソコンが遅い",
+        "画面が真っ暗になる",
+        "端末トラブル",
+        "端末障害"
+      ],
+      "flow": [
+        {
+          "step": 1,
+          "type": "message",
+          "content": "端末のトラブルについてお聞きします。どのような症状が発生していますか？"
+        },
+        {
+          "step": 2,
+          "type": "question",
+          "variable": "symptom_description",
+          "prompt": "症状をできるだけ詳しく教えてください。（例：起動時にエラーメッセージが表示される、特定のアプリが落ちる 等）",
+          "input_type": "text"
+        },
+        {
+          "step": 3,
+          "type": "question",
+          "variable": "affected_os",
+          "prompt": "端末の OS を教えてください。",
+          "input_type": "choice",
+          "choices": ["Windows 10", "Windows 11", "Windows Server", "macOS", "その他"]
+        },
+        {
+          "step": 4,
+          "type": "question",
+          "variable": "symptom_timing",
+          "prompt": "症状はいつから発生していますか？",
+          "input_type": "choice",
+          "choices": ["今日突然発生", "数日前から", "1週間以上前から", "特定の操作後から"]
+        },
+        {
+          "step": 5,
+          "type": "http_action",
+          "description": "Azure AI Search でナレッジを検索する（ハイブリッド検索）",
+          "connector": "AzureAISearch_CustomConnector",
+          "action": "SearchDocuments",
+          "request_body": {
+            "search": "{symptom_description}",
+            "queryType": "semantic",
+            "semanticConfiguration": "tanium-semantic",
+            "vectorQueries": [
+              {
+                "kind": "text",
+                "text": "{symptom_description}",
+                "fields": "symptom_vector,resolution_vector",
+                "k": 5
+              }
+            ],
+            "filter": "affected_os/any(os: os eq '{affected_os}')",
+            "select": "id,symptom,cause,resolution,tanium_query,severity,category,tags",
+            "top": 3,
+            "captions": "extractive",
+            "answers": "extractive|count-3"
+          },
+          "output_variable": "search_results"
+        },
+        {
+          "step": 6,
+          "type": "condition",
+          "condition": "search_results.value.count > 0",
+          "true_branch": [
+            {
+              "step": "6a",
+              "type": "generative_ai_node",
+              "system_prompt_file": "system_prompt.txt",
+              "user_message": "ユーザーの症状: {symptom_description}\nOS: {affected_os}\n発生時期: {symptom_timing}\n\n検索結果:\n{search_results}",
+              "output_variable": "ai_response"
+            },
+            {
+              "step": "6b",
+              "type": "message",
+              "content": "{ai_response}"
+            }
+          ],
+          "false_branch": [
+            {
+              "step": "6c",
+              "type": "message",
+              "content": "申し訳ありませんが、「{symptom_description}」に一致するナレッジが見つかりませんでした。\n\n以下の対応をご検討ください：\n- より具体的なエラーメッセージで再度検索\n- ITヘルプデスクへのエスカレーション\n- 新しいケースとしてナレッジに追加"
+            }
+          ]
+        },
+        {
+          "step": 7,
+          "type": "question",
+          "variable": "resolved",
+          "prompt": "この情報は問題解決に役立ちましたか？",
+          "input_type": "choice",
+          "choices": ["はい、解決しました", "一部解決しました", "解決しませんでした"]
+        },
+        {
+          "step": 8,
+          "type": "condition",
+          "condition": "resolved equals '解決しませんでした'",
+          "true_branch": [
+            {
+              "step": "8a",
+              "type": "redirect_topic",
+              "target_topic": "エスカレーション"
+            }
+          ],
+          "false_branch": [
+            {
+              "step": "8b",
+              "type": "message",
+              "content": "問題が解決できてよかったです。他にご不明な点があればお気軽にどうぞ。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ネットワーク診断",
+      "description": "ネットワーク接続障害・通信品質問題を診断する。",
+      "trigger_phrases": [
+        "ネットに繋がらない",
+        "インターネットが使えない",
+        "VPNが切れる",
+        "ネットが遅い",
+        "Wi-Fiに繋がらない",
+        "プロキシエラー",
+        "DNSエラー",
+        "ネットワーク障害",
+        "接続できない",
+        "通信できない"
+      ],
+      "flow": [
+        {
+          "step": 1,
+          "type": "message",
+          "content": "ネットワークの問題についてお聞きします。"
+        },
+        {
+          "step": 2,
+          "type": "question",
+          "variable": "network_symptom_type",
+          "prompt": "どのような症状ですか？",
+          "input_type": "choice",
+          "choices": [
+            "インターネットに全く繋がらない",
+            "特定のサイト・サービスのみ繋がらない",
+            "VPN接続が切れる・繋がらない",
+            "通信が極端に遅い",
+            "DNSエラーが出る",
+            "プロキシエラーが出る"
+          ]
+        },
+        {
+          "step": 3,
+          "type": "question",
+          "variable": "network_scope",
+          "prompt": "影響範囲を教えてください。",
+          "input_type": "choice",
+          "choices": ["自分のPCのみ", "同じフロアの複数台", "拠点全体", "複数拠点"]
+        },
+        {
+          "step": 4,
+          "type": "question",
+          "variable": "network_symptom_detail",
+          "prompt": "エラーメッセージや具体的な状況を教えてください。",
+          "input_type": "text"
+        },
+        {
+          "step": 5,
+          "type": "condition",
+          "condition": "network_scope not equals '自分のPCのみ'",
+          "true_branch": [
+            {
+              "step": "5a",
+              "type": "message",
+              "content": "複数台への影響が確認されています。ネットワーク管理者へのエスカレーションを推奨します。\n\n引き続き個別端末の診断も行います。"
+            }
+          ]
+        },
+        {
+          "step": 6,
+          "type": "http_action",
+          "description": "ネットワーク関連ナレッジを検索",
+          "connector": "AzureAISearch_CustomConnector",
+          "action": "SearchDocuments",
+          "request_body": {
+            "search": "{network_symptom_type} {network_symptom_detail}",
+            "queryType": "semantic",
+            "semanticConfiguration": "tanium-semantic",
+            "vectorQueries": [
+              {
+                "kind": "text",
+                "text": "{network_symptom_type} {network_symptom_detail}",
+                "fields": "symptom_vector",
+                "k": 5
+              }
+            ],
+            "filter": "category eq 'ネットワーク'",
+            "select": "id,symptom,cause,resolution,tanium_query,severity",
+            "top": 3
+          },
+          "output_variable": "network_search_results"
+        },
+        {
+          "step": 7,
+          "type": "generative_ai_node",
+          "system_prompt_file": "system_prompt.txt",
+          "user_message": "ネットワーク症状: {network_symptom_type}\n詳細: {network_symptom_detail}\n影響範囲: {network_scope}\n\n検索結果:\n{network_search_results}",
+          "output_variable": "network_ai_response"
+        },
+        {
+          "step": 8,
+          "type": "message",
+          "content": "{network_ai_response}"
+        },
+        {
+          "step": 9,
+          "type": "question",
+          "variable": "want_tanium_check",
+          "prompt": "Tanium でネットワーク状態を確認しますか？",
+          "input_type": "choice",
+          "choices": ["はい、確認してください", "不要です"]
+        },
+        {
+          "step": 10,
+          "type": "condition",
+          "condition": "want_tanium_check equals 'はい、確認してください'",
+          "true_branch": [
+            {
+              "step": "10a",
+              "type": "redirect_topic",
+              "target_topic": "Taniumクエリ実行",
+              "pass_variables": {
+                "suggested_query": "network_search_results[0].tanium_query"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Taniumクエリ実行",
+      "description": "Tanium センサークエリを実行してエンドポイントの実データを取得する。",
+      "trigger_phrases": [
+        "Taniumでクエリを実行して",
+        "センサーデータを取得",
+        "Taniumで確認して",
+        "エンドポイントの状態を調べて",
+        "Taniumクエリ",
+        "端末情報をTaniumで取得"
+      ],
+      "flow": [
+        {
+          "step": 1,
+          "type": "message",
+          "content": "Tanium クエリを実行します。"
+        },
+        {
+          "step": 2,
+          "type": "question",
+          "variable": "query_target",
+          "prompt": "クエリ対象を指定してください。",
+          "input_type": "choice",
+          "choices": [
+            "特定の端末（コンピュータ名またはIPアドレスを指定）",
+            "特定のグループ",
+            "全端末"
+          ]
+        },
+        {
+          "step": 3,
+          "type": "condition",
+          "condition": "query_target equals '特定の端末（コンピュータ名またはIPアドレスを指定）'",
+          "true_branch": [
+            {
+              "step": "3a",
+              "type": "question",
+              "variable": "target_identifier",
+              "prompt": "対象端末のコンピュータ名またはIPアドレスを入力してください。",
+              "input_type": "text"
+            }
+          ]
+        },
+        {
+          "step": 4,
+          "type": "question",
+          "variable": "tanium_query_input",
+          "prompt": "実行するTaniumクエリを入力してください。\n\n（ナレッジから提案クエリがある場合はそちらを使用できます）",
+          "input_type": "text",
+          "pre_filled_value": "{suggested_query}"
+        },
+        {
+          "step": 5,
+          "type": "http_action",
+          "description": "Tanium REST API でクエリを実行",
+          "connector": "Tanium_API_CustomConnector",
+          "action": "ExecuteQuestion",
+          "request_body": {
+            "query_text": "{tanium_query_input}",
+            "filter": "{target_identifier}"
+          },
+          "output_variable": "tanium_query_result"
+        },
+        {
+          "step": 6,
+          "type": "generative_ai_node",
+          "system_prompt_file": "system_prompt.txt",
+          "user_message": "Tanium クエリ実行結果:\nクエリ: {tanium_query_input}\n対象: {query_target} {target_identifier}\n\n結果データ:\n{tanium_query_result}\n\nこの結果を解釈し、問題点や推奨アクションを日本語で説明してください。",
+          "output_variable": "tanium_result_interpretation"
+        },
+        {
+          "step": 7,
+          "type": "message",
+          "content": "**Tanium クエリ結果の解析**\n\n{tanium_result_interpretation}"
+        }
+      ]
+    },
+    {
+      "name": "ナレッジ更新",
+      "description": "新しいトラブルシューティングケースをナレッジベースに追加する。",
+      "trigger_phrases": [
+        "新しい解決策を登録",
+        "ナレッジを追加",
+        "トラブルシューティング情報を登録",
+        "解決方法を共有",
+        "ナレッジベースを更新",
+        "新しいケースを追加"
+      ],
+      "flow": [
+        {
+          "step": 1,
+          "type": "message",
+          "content": "新しいトラブルシューティングケースを登録します。以下の情報を入力してください。"
+        },
+        {
+          "step": 2,
+          "type": "question",
+          "variable": "new_symptom",
+          "prompt": "症状・障害内容を入力してください。（どのような問題が発生しましたか？）",
+          "input_type": "text"
+        },
+        {
+          "step": 3,
+          "type": "question",
+          "variable": "new_cause",
+          "prompt": "原因を入力してください。（なぜ発生しましたか？）",
+          "input_type": "text"
+        },
+        {
+          "step": 4,
+          "type": "question",
+          "variable": "new_resolution",
+          "prompt": "解決手順を入力してください。（どのように解決しましたか？ステップごとに記載）",
+          "input_type": "text"
+        },
+        {
+          "step": 5,
+          "type": "question",
+          "variable": "new_category",
+          "prompt": "カテゴリを選択してください。",
+          "input_type": "choice",
+          "choices": [
+            "Taniumクライアント",
+            "ネットワーク",
+            "端末パフォーマンス",
+            "パッチ管理",
+            "アプリケーション障害",
+            "セキュリティ",
+            "その他"
+          ]
+        },
+        {
+          "step": 6,
+          "type": "question",
+          "variable": "new_severity",
+          "prompt": "重要度を選択してください。",
+          "input_type": "choice",
+          "choices": ["low（低）", "medium（中）", "high（高）", "critical（緊急）"]
+        },
+        {
+          "step": 7,
+          "type": "question",
+          "variable": "new_affected_os",
+          "prompt": "対象OSを選択してください（複数選択可）。",
+          "input_type": "multi_choice",
+          "choices": ["Windows 10", "Windows 11", "Windows Server 2019", "Windows Server 2022", "macOS 13", "macOS 14", "Linux"]
+        },
+        {
+          "step": 8,
+          "type": "question",
+          "variable": "new_tanium_query",
+          "prompt": "関連する Tanium クエリがあれば入力してください。（任意）",
+          "input_type": "text",
+          "optional": true
+        },
+        {
+          "step": 9,
+          "type": "message",
+          "content": "以下の内容で登録します。確認してください：\n\n**症状:** {new_symptom}\n**原因:** {new_cause}\n**解決手順:** {new_resolution}\n**カテゴリ:** {new_category}\n**重要度:** {new_severity}\n**対象OS:** {new_affected_os}"
+        },
+        {
+          "step": 10,
+          "type": "question",
+          "variable": "confirm_registration",
+          "prompt": "この内容でナレッジに登録しますか？",
+          "input_type": "choice",
+          "choices": ["はい、登録します", "内容を修正します", "キャンセルします"]
+        },
+        {
+          "step": 11,
+          "type": "condition",
+          "condition": "confirm_registration equals 'はい、登録します'",
+          "true_branch": [
+            {
+              "step": "11a",
+              "type": "http_action",
+              "description": "Azure Functions / Logic Apps 経由で update_knowledge.py を呼び出す",
+              "connector": "KnowledgeUpdate_CustomConnector",
+              "action": "AddKnowledgeCase",
+              "request_body": {
+                "symptom": "{new_symptom}",
+                "cause": "{new_cause}",
+                "resolution": "{new_resolution}",
+                "category": "{new_category}",
+                "severity": "{new_severity}",
+                "affected_os": "{new_affected_os}",
+                "tanium_query": "{new_tanium_query}"
+              },
+              "output_variable": "registration_result"
+            },
+            {
+              "step": "11b",
+              "type": "message",
+              "content": "ナレッジを登録しました。ID: {registration_result.id}\n\n次回から類似の質問に対してこの情報が活用されます。"
+            }
+          ],
+          "false_branch": [
+            {
+              "step": "11c",
+              "type": "message",
+              "content": "登録をキャンセルしました。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "エスカレーション",
+      "description": "AIが解決できないケースをヘルプデスクへエスカレーションする。",
+      "trigger_phrases": [
+        "ヘルプデスクに繋いで",
+        "担当者に相談したい",
+        "エスカレーション"
+      ],
+      "flow": [
+        {
+          "step": 1,
+          "type": "message",
+          "content": "申し訳ありません。この問題はAIエージェントでは解決が難しい状況です。\n\nITヘルプデスクへエスカレーションします。"
+        },
+        {
+          "step": 2,
+          "type": "question",
+          "variable": "user_contact",
+          "prompt": "担当者が折り返し連絡できるよう、連絡先（メールまたは電話番号）を教えてください。",
+          "input_type": "text"
+        },
+        {
+          "step": 3,
+          "type": "http_action",
+          "description": "ServiceNow / ITSM チケット作成",
+          "connector": "ServiceNow_CustomConnector",
+          "action": "CreateIncident",
+          "request_body": {
+            "short_description": "Tanium エージェントからのエスカレーション: {symptom_description}",
+            "description": "症状: {symptom_description}\nOS: {affected_os}\n連絡先: {user_contact}",
+            "urgency": "2",
+            "category": "hardware"
+          },
+          "output_variable": "ticket_result"
+        },
+        {
+          "step": 4,
+          "type": "message",
+          "content": "ヘルプデスクチケットを作成しました。\n\nチケット番号: **{ticket_result.number}**\n\n担当者より {user_contact} へご連絡します。通常 2 時間以内に対応いたします。"
+        }
+      ]
+    },
+    {
+      "name": "フォールバック",
+      "description": "どのトピックにもマッチしない入力を処理する。",
+      "trigger_phrases": [],
+      "is_fallback": true,
+      "flow": [
+        {
+          "step": 1,
+          "type": "message",
+          "content": "申し訳ありませんが、ご質問の意図が理解できませんでした。\n\n以下のようにお聞きいただくと適切に対応できます：\n\n- 「端末が重い」→ 端末トラブル診断\n- 「ネットに繋がらない」→ ネットワーク診断\n- 「Taniumでクエリを実行して」→ Taniumクエリ実行\n- 「ナレッジを追加」→ ナレッジ更新"
+        }
+      ]
+    }
+  ],
+  "custom_connectors": [
+    {
+      "name": "AzureAISearch_CustomConnector",
+      "description": "Azure AI Search REST API へのカスタムコネクタ",
+      "base_url": "https://<your-service>.search.windows.net",
+      "auth_type": "api_key",
+      "auth_header": "api-key",
+      "actions": [
+        {
+          "name": "SearchDocuments",
+          "method": "POST",
+          "path": "/indexes/{indexName}/docs/search",
+          "query_params": {"api-version": "2024-05-01-preview"}
+        }
+      ]
+    },
+    {
+      "name": "Tanium_API_CustomConnector",
+      "description": "Tanium REST API へのカスタムコネクタ",
+      "base_url": "https://<your-tanium-server>/api/v2",
+      "auth_type": "api_key",
+      "auth_header": "session",
+      "actions": [
+        {
+          "name": "ExecuteQuestion",
+          "method": "POST",
+          "path": "/questions"
+        }
+      ]
+    },
+    {
+      "name": "KnowledgeUpdate_CustomConnector",
+      "description": "ナレッジ追加用 Azure Functions エンドポイント",
+      "base_url": "https://<your-function-app>.azurewebsites.net/api",
+      "auth_type": "function_key",
+      "actions": [
+        {
+          "name": "AddKnowledgeCase",
+          "method": "POST",
+          "path": "/add-knowledge"
+        }
+      ]
+    }
+  ]
+}
